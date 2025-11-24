@@ -34,11 +34,6 @@ const POOL_ABI = [
 
 type SwapDirection = "0to1" | "1to0";
 
-type TxItem = {
-  hash: string;
-  label: string;
-};
-
 export default function HomePage() {
   const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
   const [signer, setSigner] = useState<ethers.Signer | null>(null);
@@ -62,19 +57,13 @@ export default function HomePage() {
 
   const [swapDirection, setSwapDirection] = useState<SwapDirection>("0to1");
   const [swapAmount, setSwapAmount] = useState<string>("");
+
   const [addAmount0, setAddAmount0] = useState<string>("");
   const [addAmount1, setAddAmount1] = useState<string>("");
 
-  const [removeAmountLP, setRemoveAmountLP] = useState<string>("");
+  const [removeLpAmount, setRemoveLpAmount] = useState<string>("");
 
   const [status, setStatus] = useState<string>("");
-
-  // slippage in basis points (100 = 1.00%)
-  const [slippageBps, setSlippageBps] = useState<number>(100);
-  const [expectedOut, setExpectedOut] = useState<number | null>(null);
-  const [minOut, setMinOut] = useState<number | null>(null);
-
-  const [txHistory, setTxHistory] = useState<TxItem[]>([]);
 
   // ---------- CONNECT WALLET ----------
   const connectWallet = async () => {
@@ -147,8 +136,6 @@ export default function HomePage() {
   }, [signer, fine5, fine6, pool]);
 
   // ---------- HELPERS ----------
-
-  // Ensure allowance for ERC20 + LP tokens
   const ensureAllowance = async (
     token: ethers.Contract,
     owner: string,
@@ -159,56 +146,8 @@ export default function HomePage() {
     if (current >= amount) return;
     setStatus("Approving token spend...");
     const tx = await token.approve(spender, amount);
-    setTxHistory((prev) => [
-      ...prev,
-      { hash: tx.hash, label: "Approve token spend" },
-    ]);
     await tx.wait();
   };
-
-  // Uniswap-style output with 0.3% fee, using current reserves
-  const computeAmountOut = (
-    amountIn: bigint,
-    direction: SwapDirection
-  ): bigint | null => {
-    if (reserves.reserve0 <= 0 || reserves.reserve1 <= 0) return null;
-
-    const reserve0 = BigInt(reserves.reserve0);
-    const reserve1 = BigInt(reserves.reserve1);
-
-    const reserveIn = direction === "0to1" ? reserve0 : reserve1;
-    const reserveOut = direction === "0to1" ? reserve1 : reserve0;
-
-    const feeBps = 30n; // 0.30%
-    const amountInWithFee = amountIn * (10000n - feeBps);
-    const numerator = amountInWithFee * reserveOut;
-    const denominator = reserveIn * 10000n + amountInWithFee;
-    if (denominator === 0n) return 0n;
-    return numerator / denominator;
-  };
-
-  // ---------- UPDATE EXPECTED OUT + MIN OUT ----------
-  useEffect(() => {
-    if (!swapAmount || Number(swapAmount) <= 0) {
-      setExpectedOut(null);
-      setMinOut(null);
-      return;
-    }
-
-    const amountIn = BigInt(swapAmount);
-    const out = computeAmountOut(amountIn, swapDirection);
-    if (out === null) {
-      setExpectedOut(null);
-      setMinOut(null);
-      return;
-    }
-
-    const slippageFactor = BigInt(10000 - slippageBps);
-    const minOutBN = (out * slippageFactor) / 10000n;
-
-    setExpectedOut(Number(out));
-    setMinOut(Number(minOutBN));
-  }, [swapAmount, swapDirection, slippageBps, reserves]);
 
   // ---------- SWAP ----------
   const handleSwap = async () => {
@@ -219,37 +158,37 @@ export default function HomePage() {
       const addr = await signer.getAddress();
       const amountIn = BigInt(swapAmount); // tokens have 0 decimals
 
-      // recompute minOut using current reserves
-      const out = computeAmountOut(amountIn, swapDirection);
-      const slippageFactor = BigInt(10000 - slippageBps);
-      const minOutBN =
-        out && out > 0n ? (out * slippageFactor) / 10000n : 0n;
+      // constant-product with 0.30% fee (30 bps)
+      const reserveIn =
+        swapDirection === "0to1"
+          ? BigInt(reserves.reserve0)
+          : BigInt(reserves.reserve1);
+      const reserveOut =
+        swapDirection === "0to1"
+          ? BigInt(reserves.reserve1)
+          : BigInt(reserves.reserve0);
+
+      const feeBps = BigInt(30); // 0.30%
+      const scale = BigInt(10000);
+
+      const amountInWithFee = amountIn * (scale - feeBps);
+      const numerator = amountInWithFee * reserveOut;
+      const denominator = reserveIn * scale + amountInWithFee;
+      const amountOut = denominator === BigInt(0) ? BigInt(0) : numerator / denominator;
+
+      console.log("Simulated amountOut:", amountOut.toString());
 
       if (swapDirection === "0to1") {
         // FINE5 -> FINE6
         await ensureAllowance(fine5, addr, POOL_ADDRESS, amountIn);
         setStatus("Swapping FINE5 → FINE6...");
-        const tx = await pool.swapExact0For1(amountIn, minOutBN);
-        setTxHistory((prev) => [
-          ...prev,
-          {
-            hash: tx.hash,
-            label: `Swap ${swapAmount} FINE5 → FINE6`,
-          },
-        ]);
+        const tx = await pool.swapExact0For1(amountIn, BigInt(0));
         await tx.wait();
       } else {
         // FINE6 -> FINE5
         await ensureAllowance(fine6, addr, POOL_ADDRESS, amountIn);
         setStatus("Swapping FINE6 → FINE5...");
-        const tx = await pool.swapExact1For0(amountIn, minOutBN);
-        setTxHistory((prev) => [
-          ...prev,
-          {
-            hash: tx.hash,
-            label: `Swap ${swapAmount} FINE6 → FINE5`,
-          },
-        ]);
+        const tx = await pool.swapExact1For0(amountIn, BigInt(0));
         await tx.wait();
       }
 
@@ -277,13 +216,6 @@ export default function HomePage() {
 
       setStatus("Adding liquidity...");
       const tx = await pool.addLiquidity(amount0, amount1);
-      setTxHistory((prev) => [
-        ...prev,
-        {
-          hash: tx.hash,
-          label: `Add liquidity ${addAmount0} FINE5 + ${addAmount1} FINE6`,
-        },
-      ]);
       await tx.wait();
 
       setStatus("Liquidity added ✅");
@@ -299,28 +231,16 @@ export default function HomePage() {
   // ---------- REMOVE LIQUIDITY ----------
   const handleRemoveLiquidity = async () => {
     if (!pool || !signer) return;
-    if (!removeAmountLP || Number(removeAmountLP) <= 0) return;
+    if (!removeLpAmount || Number(removeLpAmount) <= 0) return;
 
     try {
-      const addr = await signer.getAddress();
-      const lpAmount = BigInt(removeAmountLP);
-
-      // if removeLiquidity uses transferFrom, this ensures allowance
-      await ensureAllowance(pool, addr, POOL_ADDRESS, lpAmount);
-
+      const lp = BigInt(removeLpAmount);
       setStatus("Removing liquidity...");
-      const tx = await pool.removeLiquidity(lpAmount);
-      setTxHistory((prev) => [
-        ...prev,
-        {
-          hash: tx.hash,
-          label: `Remove liquidity ${removeAmountLP} LP`,
-        },
-      ]);
+      const tx = await pool.removeLiquidity(lp);
       await tx.wait();
 
       setStatus("Liquidity removed ✅");
-      setRemoveAmountLP("");
+      setRemoveLpAmount("");
       void refreshData();
     } catch (err) {
       console.error(err);
@@ -328,6 +248,7 @@ export default function HomePage() {
     }
   };
 
+  // ---------- PRICES (display only, JS numbers) ----------
   const price0in1 =
     reserves.reserve0 > 0 && reserves.reserve1 > 0
       ? reserves.reserve1 / reserves.reserve0
@@ -337,19 +258,7 @@ export default function HomePage() {
       ? reserves.reserve0 / reserves.reserve1
       : 0;
 
-  const logoPillStyle = (bg: string): React.CSSProperties => ({
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0.15rem 0.5rem",
-    borderRadius: "999px",
-    fontSize: "0.75rem",
-    fontWeight: 600,
-    background: bg,
-    color: "white",
-    marginRight: "0.35rem",
-  });
-
+  // ---------- UI ----------
   return (
     <div style={{ minHeight: "100vh", background: "#070B16", color: "white" }}>
       <div
@@ -428,18 +337,9 @@ export default function HomePage() {
             <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>
               Your Balances
             </h2>
-            <p>
-              <span style={logoPillStyle("#7c3aed")}>F5</span>
-              FINE5: {balances.fine5}
-            </p>
-            <p>
-              <span style={logoPillStyle("#22c55e")}>F6</span>
-              FINE6: {balances.fine6}
-            </p>
-            <p>
-              <span style={logoPillStyle("#f97316")}>LP</span>
-              LP (F5F6-LP): {balances.lp}
-            </p>
+            <p>FINE5: {balances.fine5}</p>
+            <p>FINE6: {balances.fine6}</p>
+            <p>LP (F5F6-LP): {balances.lp}</p>
           </div>
           <div
             style={{
@@ -452,14 +352,8 @@ export default function HomePage() {
             <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>
               Pool Reserves
             </h2>
-            <p>
-              <span style={logoPillStyle("#7c3aed")}>F5</span>
-              reserve0 (FINE5): {reserves.reserve0}
-            </p>
-            <p>
-              <span style={logoPillStyle("#22c55e")}>F6</span>
-              reserve1 (FINE6): {reserves.reserve1}
-            </p>
+            <p>reserve0 (FINE5): {reserves.reserve0}</p>
+            <p>reserve1 (FINE6): {reserves.reserve1}</p>
             <p style={{ marginTop: "0.75rem", fontSize: "0.9rem" }}>
               1 FINE5 ≈ {price0in1.toFixed(4)} FINE6
               <br />
@@ -468,7 +362,7 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* Swap + Add / Remove Liquidity */}
+        {/* Swap + Liquidity */}
         <section
           style={{
             display: "grid",
@@ -510,27 +404,6 @@ export default function HomePage() {
               </select>
             </div>
 
-            <div style={{ marginBottom: "0.75rem" }}>
-              <label style={{ fontSize: "0.9rem" }}>Slippage</label>
-              <select
-                value={slippageBps}
-                onChange={(e) => setSlippageBps(Number(e.target.value))}
-                style={{
-                  width: "100%",
-                  marginTop: "0.25rem",
-                  padding: "0.5rem 0.75rem",
-                  borderRadius: "0.75rem",
-                  border: "1px solid #374151",
-                  background: "#020617",
-                  color: "white",
-                }}
-              >
-                <option value={50}>0.50%</option>
-                <option value={100}>1.00%</option>
-                <option value={200}>2.00%</option>
-              </select>
-            </div>
-
             <div style={{ marginBottom: "1rem" }}>
               <label style={{ fontSize: "0.9rem" }}>Amount in</label>
               <input
@@ -549,21 +422,6 @@ export default function HomePage() {
                   color: "white",
                 }}
               />
-              {expectedOut !== null && minOut !== null && (
-                <p
-                  style={{
-                    marginTop: "0.45rem",
-                    fontSize: "0.85rem",
-                    color: "#9ca3af",
-                  }}
-                >
-                  Expected out: {expectedOut}{" "}
-                  {swapDirection === "0to1" ? "FINE6" : "FINE5"}
-                  <br />
-                  Min received ({(slippageBps / 100).toFixed(2)}% slippage):{" "}
-                  {minOut}
-                </p>
-              )}
             </div>
 
             <button
@@ -597,172 +455,123 @@ export default function HomePage() {
             }}
           >
             <h2 style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>
-              Add Liquidity
+              Liquidity
             </h2>
 
-            <div style={{ marginBottom: "0.75rem" }}>
-              <label style={{ fontSize: "0.9rem" }}>FINE5 amount</label>
-              <input
-                type="number"
-                min={0}
-                value={addAmount0}
-                onChange={(e) => setAddAmount0(e.target.value)}
-                placeholder="0"
-                style={{
-                  width: "100%",
-                  marginTop: "0.25rem",
-                  padding: "0.6rem 0.75rem",
-                  borderRadius: "0.75rem",
-                  border: "1px solid #374151",
-                  background: "#020617",
-                  color: "white",
-                }}
-              />
-            </div>
+            {/* Add */}
             <div style={{ marginBottom: "1rem" }}>
-              <label style={{ fontSize: "0.9rem" }}>FINE6 amount</label>
-              <input
-                type="number"
-                min={0}
-                value={addAmount1}
-                onChange={(e) => setAddAmount1(e.target.value)}
-                placeholder="0"
+              <h3 style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>
+                Add Liquidity
+              </h3>
+              <div style={{ marginBottom: "0.5rem" }}>
+                <label style={{ fontSize: "0.9rem" }}>FINE5 amount</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={addAmount0}
+                  onChange={(e) => setAddAmount0(e.target.value)}
+                  placeholder="0"
+                  style={{
+                    width: "100%",
+                    marginTop: "0.25rem",
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.75rem",
+                    border: "1px solid #374151",
+                    background: "#020617",
+                    color: "white",
+                  }}
+                />
+              </div>
+              <div style={{ marginBottom: "0.75rem" }}>
+                <label style={{ fontSize: "0.9rem" }}>FINE6 amount</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={addAmount1}
+                  onChange={(e) => setAddAmount1(e.target.value)}
+                  placeholder="0"
+                  style={{
+                    width: "100%",
+                    marginTop: "0.25rem",
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.75rem",
+                    border: "1px solid #374151",
+                    background: "#020617",
+                    color: "white",
+                  }}
+                />
+              </div>
+
+              <button
+                onClick={handleAddLiquidity}
+                disabled={!account || !networkOk}
                 style={{
                   width: "100%",
-                  marginTop: "0.25rem",
-                  padding: "0.6rem 0.75rem",
-                  borderRadius: "0.75rem",
-                  border: "1px solid #374151",
-                  background: "#020617",
+                  padding: "0.6rem",
+                  borderRadius: "999px",
+                  border: "none",
+                  background:
+                    !account || !networkOk
+                      ? "#4b5563"
+                      : "linear-gradient(90deg,#22c55e,#16a34a)",
                   color: "white",
+                  fontWeight: 600,
+                  cursor: !account || !networkOk ? "not-allowed" : "pointer",
+                  marginBottom: "1rem",
                 }}
-              />
+              >
+                {account && networkOk ? "Add Liquidity" : "Connect wallet first"}
+              </button>
             </div>
 
-            <button
-              onClick={handleAddLiquidity}
-              disabled={!account || !networkOk}
-              style={{
-                width: "100%",
-                padding: "0.7rem",
-                borderRadius: "999px",
-                border: "none",
-                background:
-                  !account || !networkOk
-                    ? "#4b5563"
-                    : "linear-gradient(90deg,#22c55e,#16a34a)",
-                color: "white",
-                fontWeight: 600,
-                cursor: !account || !networkOk ? "not-allowed" : "pointer",
-                marginBottom: "1.25rem",
-              }}
-            >
-              {account && networkOk ? "Add Liquidity" : "Connect wallet first"}
-            </button>
+            {/* Remove */}
+            <div>
+              <h3 style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>
+                Remove Liquidity
+              </h3>
+              <div style={{ marginBottom: "0.75rem" }}>
+                <label style={{ fontSize: "0.9rem" }}>LP amount</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={removeLpAmount}
+                  onChange={(e) => setRemoveLpAmount(e.target.value)}
+                  placeholder="0"
+                  style={{
+                    width: "100%",
+                    marginTop: "0.25rem",
+                    padding: "0.6rem 0.75rem",
+                    borderRadius: "0.75rem",
+                    border: "1px solid #374151",
+                    background: "#020617",
+                    color: "white",
+                  }}
+                />
+              </div>
 
-            <hr
-              style={{
-                borderColor: "#1f2937",
-                margin: "0.75rem 0 1rem",
-              }}
-            />
-
-            <h2 style={{ fontSize: "1.05rem", marginBottom: "0.75rem" }}>
-              Remove Liquidity
-            </h2>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label style={{ fontSize: "0.9rem" }}>LP amount</label>
-              <input
-                type="number"
-                min={0}
-                value={removeAmountLP}
-                onChange={(e) => setRemoveAmountLP(e.target.value)}
-                placeholder="0"
+              <button
+                onClick={handleRemoveLiquidity}
+                disabled={!account || !networkOk}
                 style={{
                   width: "100%",
-                  marginTop: "0.25rem",
-                  padding: "0.6rem 0.75rem",
-                  borderRadius: "0.75rem",
-                  border: "1px solid #374151",
-                  background: "#020617",
+                  padding: "0.6rem",
+                  borderRadius: "999px",
+                  border: "none",
+                  background:
+                    !account || !networkOk
+                      ? "#4b5563"
+                      : "linear-gradient(90deg,#f97316,#ea580c)",
                   color: "white",
+                  fontWeight: 600,
+                  cursor: !account || !networkOk ? "not-allowed" : "pointer",
                 }}
-              />
+              >
+                {account && networkOk
+                  ? "Remove Liquidity"
+                  : "Connect wallet first"}
+              </button>
             </div>
-
-            <button
-              onClick={handleRemoveLiquidity}
-              disabled={!account || !networkOk}
-              style={{
-                width: "100%",
-                padding: "0.7rem",
-                borderRadius: "999px",
-                border: "none",
-                background:
-                  !account || !networkOk
-                    ? "#4b5563"
-                    : "linear-gradient(90deg,#f97316,#ea580c)",
-                color: "white",
-                fontWeight: 600,
-                cursor: !account || !networkOk ? "not-allowed" : "pointer",
-              }}
-            >
-              {account && networkOk
-                ? "Remove Liquidity"
-                : "Connect wallet first"}
-            </button>
           </div>
-        </section>
-
-        {/* Transaction history */}
-        <section
-          style={{
-            marginTop: "2.5rem",
-            padding: "1.25rem",
-            borderRadius: "1.25rem",
-            background: "#020617",
-            border: "1px solid #1f2937",
-          }}
-        >
-          <h2 style={{ fontSize: "1.1rem", marginBottom: "0.75rem" }}>
-            Recent Transactions
-          </h2>
-          {txHistory.length === 0 ? (
-            <p style={{ fontSize: "0.9rem", color: "#9ca3af" }}>
-              No transactions yet. Swaps and liquidity actions will appear here.
-            </p>
-          ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {txHistory
-                .slice()
-                .reverse()
-                .map((tx) => (
-                  <li
-                    key={tx.hash}
-                    style={{
-                      padding: "0.45rem 0",
-                      borderBottom: "1px solid #111827",
-                      fontSize: "0.9rem",
-                    }}
-                  >
-                    <div>{tx.label}</div>
-                    <a
-                      href={`https://sepolia.etherscan.io/tx/${tx.hash}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{
-                        fontSize: "0.8rem",
-                        color: "#60a5fa",
-                        textDecoration: "underline",
-                      }}
-                    >
-                      View on Etherscan
-                    </a>
-                  </li>
-                ))}
-            </ul>
-          )}
         </section>
       </div>
     </div>
