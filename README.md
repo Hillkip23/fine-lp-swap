@@ -98,7 +98,7 @@ lib/          (recommended to add)
 npm install
 
 2. Create .env.local
-NEXT_PUBLIC_RPC_URL="https://sepolia.infura.io/v3/<YOUR_KEY>"
+NEXT_PUBLIC_RPC_URL="https://sepolia.infura.io/v3/ec868129390f4ee3b4c27d2a93ffb796"
 NEXT_PUBLIC_TOKEN_ADDRESS="0x0FB987BEE67FD839cb1158B0712d5e4Be483dd2E"
 NEXT_PUBLIC_SWAP_ADDRESS="0xe051C1eA47b246c79f3bac4e58E459cF2Aa20692"
 
